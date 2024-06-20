@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, shrink-to-fit=no">
+    <link href="https://unpkg.com/tailwindcss@^1.0/dist/tailwind.min.css" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f8fafc;
+            color: #333;
+        }
+        #app {
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .btn-primary {
+            background-color: #3b82f6;
+            color: #fff;
+        }
+        .btn-secondary {
+            background-color: #6b7280;
+            color: #fff;
+        }
+        .title {
+            font-size: 2rem;
+            font-weight: bold;
+            margin-bottom: 20px;
+            background-color: #a7f3d0;
+            display: inline-block;
+            padding: 10px 20px;
+            border-radius: 8px;
+        }
+        .preview-container {
+            margin-bottom: 20px;
+        }
+        .editable-content {
+            white-space: pre-wrap; /* 改行とスペースを保持 */
+            word-wrap: break-word; /* テキストの長さが幅を超える場合に折り返し */
+        }
+        .button-group {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+        }
+    </style>
+</head>
+<body>
+    <div id="app" class="text-center">
+        <div class="title">Web OCR</div>
+
+        <div class="preview-container">
+            <div ref="canvas-container" class="w-full mb-4" v-show="cameraVisible">
+                <canvas ref="canvas" class="w-full border rounded shadow"></canvas>
+            </div>
+
+            <div v-if="status === 'play'">
+                <button class="btn-primary hover:bg-blue-700 text-white font-bold px-6 py-2 rounded" @click="takeSnapshot">
+                    スナップショットを取る
+                </button>
+            </div>
+
+            <div v-if="status === 'pause'" class="mt-2">
+                <button class="btn-primary hover:bg-blue-700 text-white font-bold px-6 py-2 mr-2 rounded" @click="runOcr">
+                    画像を読み取る
+                </button>
+                <button class="btn-secondary hover:bg-gray-700 text-white font-bold px-6 py-2 rounded" @click="playVideo">
+                    戻る
+                </button>
+            </div>
+
+            <div v-if="status === 'reading'" class="text-lg font-semibold mt-4">
+                読み取り中です...
+            </div>
+        </div>
+
+        <div v-if="ocrResult" class="mt-4 p-4 bg-white border rounded shadow text-left">
+            <div class="font-bold mb-2">OCR結果:</div>
+            <div class="mb-4 editable-content" contenteditable="true" @blur="updateOcrResult">{{ ocrResult }}</div>
+            <div v-if="url" class="mt-2">
+                <a :href="url" target="_blank" class="text-blue-500 underline">{{ url }}</a>
+            </div>
+            <div class="button-group">
+                <button class="btn-primary hover:bg-blue-700 text-white font-bold px-6 py-2 rounded" @click="copyToClipboard">
+                    OCR結果をコピー
+                </button>
+                <button class="btn-primary hover:bg-blue-700 text-white font-bold px-6 py-2 rounded" @click="exportToTextFile">
+                    テキストファイルとしてエクスポート
+                </button>
+            </div>
+        </div>
+
+        <div v-if="qrCodeResult" class="mt-4 p-4 bg-white border rounded shadow text-left">
+            <div class="font-bold mt-4 mb-2">QRコード結果:</div>
+            <div class="mb-4 editable-content" contenteditable="true" @blur="updateQrCodeResult">{{ qrCodeResult }}</div>
+            <div v-if="qrCodeUrl" class="mt-2">
+                <a :href="qrCodeUrl" target="_blank" class="text-blue-500 underline">{{ qrCodeUrl }}</a>
+            </div>
+        </div>
+
+        <div class="mt-4">
+            <button class="btn-primary hover:bg-green-700 text-white font-bold px-6 py-2 rounded" @click="toggleCamera">
+                カメラを表示/非表示
+            </button>
+        </div>
+
+        <div class="mt-4">
+            <input type="file" @change="handleFileUpload" accept="image/*" class="block w-full text-sm text-gray-500 border border-gray-300 rounded cursor-pointer focus:outline-none focus:ring focus:border-blue-300">
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/vue@3.0.0/dist/vue.global.prod.js"></script>
+    <script src="https://unpkg.com/tesseract.js@4.1.1/dist/tesseract.min.js"></script>
+    <script src="https://unpkg.com/@zxing/library@latest"></script>
+    <script>
+        Vue.createApp({
+            data() {
+                return {
+                    video: null,
+                    canvas: null,
+                    context: null,
+                    dataUrl: '',
+                    status: 'none',
+                    cameraVisible: true, // 初期状態でカメラを表示
+                    ocrResult: '', // OCR結果の保存用
+                    qrCodeResult: '', // QRコード結果の保存用
+                    url: '', // URLの保存用
+                    qrCodeUrl: '' // QRコードのURLの保存用
+                }
+            },
+            methods: {
+                initialize() {
+                    this.status = 'initialize';
+                    navigator.mediaDevices.getUserMedia({
+                        video: {
+                            facingMode: { ideal: 'environment' }
+                        }
+                    })
+                    .then(stream => {
+                        this.canvas = this.$refs.canvas;
+                        this.context = this.canvas.getContext('2d');
+                        this.video = document.createElement('video');
+                        this.video.addEventListener('loadedmetadata', () => {
+                            const canvasContainer = this.$refs['canvas-container'];
+                            this.canvas.width = canvasContainer.offsetWidth;
+                            this.canvas.height = parseInt(this.canvas.width * this.video.videoHeight / this.video.videoWidth);
+                            this.render();
+                        });
+                        this.video.setAttribute('autoplay', '');
+                        this.video.setAttribute('muted', '');
+                        this.video.setAttribute('playsinline', '');
+                        this.video.srcObject = stream;
+                        this.playVideo();
+                    })
+                    .catch(error => console.log(error));
+                },
+                render() {
+                    if (this.video.readyState === this.video.HAVE_ENOUGH_DATA) {
+                        this.context.drawImage(this.video, 0, 0, this.canvas.width, this.canvas.height);
+                    }
+                    requestAnimationFrame(this.render);
+                },
+                async runOcr() {
+                    this.status = 'reading';
+                    try {
+                        const ocrResult = await Tesseract.recognize(this.dataUrl, 'eng+jpn', {
+                            logger: log => { console.log(log); }
+                        });
+                        this.ocrResult = ocrResult.data.text;
+                        this.extractUrl(ocrResult.data.text);
+
+                        await this.readQrCode(this.dataUrl);
+                    } catch (error) {
+                        console.log(error);
+                    } finally {
+                        this.status = 'pause';
+                    }
+                },
+                async readQrCode(dataUrl) {
+                    try {
+                        const codeReader = new ZXing.BrowserQRCodeReader();
+                        const result = await codeReader.decodeFromImage(undefined, dataUrl);
+                        this.qrCodeResult = result.text;
+                        this.qrCodeUrl = this.qrCodeResult.startsWith('http') ? this.qrCodeResult : '';
+                    } catch (err) {
+                        console.error('QRコード読み取りに失敗しました: ', err);
+                        this.qrCodeResult = 'QRコード読み取りに失敗しました。';
+                        this.qrCodeUrl = '';
+                    }
+                },
+                playVideo() {
+                    this.video.play();
+                    this.status = 'play';
+                },
+                pauseVideo() {
+                    this.video.pause();
+                    this.status = 'pause';
+                },
+                takeSnapshot() {
+                    this.pauseVideo();
+                    this.dataUrl = this.canvas.toDataURL();
+                },
+                toggleCamera() {
+                    this.cameraVisible = !this.cameraVisible;
+                    if (this.cameraVisible) {
+                        this.initialize();
+                    } else {
+                        if (this.video && this.video.srcObject) {
+                            this.video.srcObject.getTracks().forEach(track => track.stop());
+                        }
+                        this.video = null;
+                        this.canvas = null;
+                        this.context = null;
+                        this.dataUrl = '';
+                    }
+                },
+                handleFileUpload(event) {
+                    const file = event.target.files[0];
+                    if (file) {
+                        const reader = new FileReader();
+                        reader.onload = (e) => {
+                            const img = new Image();
+                            img.onload = () => {
+                                this.canvas.width = img.width;
+                                this.canvas.height = img.height;
+                                this.context.drawImage(img, 0, 0);
+                                this.dataUrl = this.canvas.toDataURL();
+                                this.runOcr();
+                            };
+                            img.src = e.target.result;
+                        };
+                        reader.readAsDataURL(file);
+                    }
+                },
+                extractUrl(text) {
+                    const urlPattern = /(https?:\/\/[^\s]+)/g;
+                    const urls = text.match(urlPattern);
+                    this.url = urls ? urls[0] : '';
+                },
+                updateOcrResult(event) {
+                    this.ocrResult = event.target.innerText;
+                },
+                updateQrCodeResult(event) {
+                    this.qrCodeResult = event.target.innerText;
+                },
+                copyToClipboard() {
+                    navigator.clipboard.writeText(this.ocrResult).then(() => {
+                        alert('OCR結果がクリップボードにコピーされました。');
+                    }).catch(error => console.error('コピーに失敗しました: ', error));
+                },
+                exportToTextFile() {
+                    const blob = new Blob([this.ocrResult], { type: 'text/plain' });
+                    const link = document.createElement('a');
+                    link.href = URL.createObjectURL(blob);
+                    link.download = 'ocr_result.txt';
+                    link.click();
+                }
+            },
+            mounted() {
+                this.initialize(); // ページロード時にカメラを起動
+            }
+        }).mount('#app');
+    </script>
+</body>
+</html>
