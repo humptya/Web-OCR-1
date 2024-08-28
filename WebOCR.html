@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, shrink-to-fit=no">
+    <title>Web OCR</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Noto Sans JP', sans-serif;
+            background-color: #f0f4f8;
+        }
+        .container {
+            max-width: 800px;
+        }
+        .btn {
+            transition: all 0.3s ease;
+        }
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 6px rgba(50, 50, 93, 0.11), 0 1px 3px rgba(0, 0, 0, 0.08);
+        }
+        .history-item {
+            transition: all 0.3s ease;
+        }
+        .history-item:hover {
+            background-color: #e2e8f0;
+        }
+        .ocr-result {
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+<body class="bg-gray-100">
+    <div id="app" class="container mx-auto px-4 py-8">
+        <h1 class="text-4xl font-bold text-center mb-8 text-indigo-700">Web OCR</h1>
+
+        <div class="bg-white rounded-lg shadow-lg p-6 mb-8">
+            <div ref="canvas-container" class="w-full mb-4" v-show="cameraVisible">
+                <canvas ref="canvas" class="w-full border-2 border-indigo-200 rounded-lg shadow-inner"></canvas>
+            </div>
+
+            <div class="flex justify-center space-x-4 mb-4">
+                <button v-if="status === 'play'" @click="takeSnapshot" class="btn bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded-lg">
+                    スナップショットを取る
+                </button>
+                <button v-if="status === 'pause'" @click="runOcr" class="btn bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-lg">
+                    画像を読み取る
+                </button>
+                <button v-if="status === 'pause'" @click="playVideo" class="btn bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded-lg">
+                    戻る
+                </button>
+            </div>
+
+            <div v-if="status === 'reading'" class="text-lg font-semibold text-center text-indigo-600">
+                読み取り中です...
+            </div>
+
+            <div class="mt-4">
+                <label for="file-upload" class="btn bg-purple-600 hover:bg-purple-700 text-white font-bold py-2 px-4 rounded-lg cursor-pointer inline-block">
+                    画像をアップロード
+                </label>
+                <input id="file-upload" type="file" @change="handleFileUpload" accept="image/*" class="hidden">
+            </div>
+        </div>
+
+        <div v-if="ocrResult" class="bg-white rounded-lg shadow-lg p-6 mb-8">
+            <h2 class="text-2xl font-bold mb-4 text-indigo-700">OCR結果</h2>
+            <div class="mb-4 p-4 bg-gray-100 rounded-lg ocr-result" contenteditable="true" @blur="updateOcrResult">{{ ocrResult }}</div>
+            <div v-if="url" class="mb-4">
+                <a :href="url" target="_blank" class="text-blue-600 hover:text-blue-800 underline">{{ url }}</a>
+            </div>
+            <div class="flex justify-center space-x-4">
+                <button @click="copyToClipboard" class="btn bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg">
+                    結果をコピー
+                </button>
+                <button @click="exportToTextFile" class="btn bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-lg">
+                    テキストファイルとして保存
+                </button>
+                <button @click="saveToHistory" class="btn bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded-lg">
+                    履歴に保存
+                </button>
+            </div>
+        </div>
+
+        <div v-if="qrCodeResult" class="bg-white rounded-lg shadow-lg p-6 mb-8">
+            <h2 class="text-2xl font-bold mb-4 text-indigo-700">QRコード結果</h2>
+            <div class="mb-4 p-4 bg-gray-100 rounded-lg" contenteditable="true" @blur="updateQrCodeResult">{{ qrCodeResult }}</div>
+            <div v-if="qrCodeUrl" class="mb-4">
+                <a :href="qrCodeUrl" target="_blank" class="text-blue-600 hover:text-blue-800 underline">{{ qrCodeUrl }}</a>
+            </div>
+        </div>
+
+        <div class="bg-white rounded-lg shadow-lg p-6">
+            <h2 class="text-2xl font-bold mb-4 text-indigo-700">履歴</h2>
+            <div v-for="(item, index) in history" :key="index" @click="loadFromHistory(item)" class="history-item p-4 border-b border-gray-200 cursor-pointer hover:bg-gray-100">
+                <div class="font-semibold text-indigo-600">{{ item.date }}</div>
+                <div class="text-gray-600">{{ item.text.substring(0, 50) }}...</div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/vue@3.2.31/dist/vue.global.prod.js"></script>
+    <script src="https://unpkg.com/tesseract.js@4.1.1/dist/tesseract.min.js"></script>
+    <script src="https://unpkg.com/@zxing/library@latest"></script>
+    <script>
+        const { createApp, ref, onMounted } = Vue;
+
+        createApp({
+            setup() {
+                const video = ref(null);
+                const canvas = ref(null);
+                const context = ref(null);
+                const dataUrl = ref('');
+                const status = ref('none');
+                const cameraVisible = ref(true);
+                const ocrResult = ref('');
+                const qrCodeResult = ref('');
+                const url = ref('');
+                const qrCodeUrl = ref('');
+                const history = ref([]);
+
+                const initialize = () => {
+                    status.value = 'initialize';
+                    navigator.mediaDevices.getUserMedia({
+                        video: {
+                            facingMode: { ideal: 'environment' }
+                        }
+                    })
+                    .then(stream => {
+                        video.value = document.createElement('video');
+                        video.value.srcObject = stream;
+                        video.value.setAttribute('playsinline', true);
+                        video.value.play();
+                        video.value.onloadedmetadata = () => {
+                            canvas.value.width = video.value.videoWidth;
+                            canvas.value.height = video.value.videoHeight;
+                            render();
+                        };
+                        playVideo();
+                    })
+                    .catch(error => console.log(error));
+                };
+
+                const render = () => {
+                    if (video.value.readyState === video.value.HAVE_ENOUGH_DATA) {
+                        context.value.drawImage(video.value, 0, 0, canvas.value.width, canvas.value.height);
+                    }
+                    requestAnimationFrame(render);
+                };
+
+                const runOcr = async () => {
+                    status.value = 'reading';
+                    try {
+                        console.log('OCR開始');
+                        const result = await Tesseract.recognize(dataUrl.value, 'eng+jpn', {
+                            logger: m => console.log(m),
+                            tessedit_pageseg_mode: Tesseract.PSM.SINGLE_BLOCK_VERT_TEXT
+                        });
+                        console.log('OCR結果:', result.data.text);
+                        ocrResult.value = result.data.text;
+                        extractUrl(result.data.text);
+                        await readQrCode(dataUrl.value);
+                    } catch (error) {
+                        console.error('OCRエラー:', error);
+                    } finally {
+                        status.value = 'pause';
+                        console.log('OCR完了');
+                    }
+                };
+
+                const readQrCode = async (dataUrl) => {
+                    try {
+                        const codeReader = new ZXing.BrowserQRCodeReader();
+                        const result = await codeReader.decodeFromImage(undefined, dataUrl);
+                        qrCodeResult.value = result.text;
+                        qrCodeUrl.value = qrCodeResult.value.startsWith('http') ? qrCodeResult.value : '';
+                    } catch (err) {
+                        console.error('QRコード読み取りに失敗しました: ', err);
+                        qrCodeResult.value = 'QRコード読み取りに失敗しました。';
+                        qrCodeUrl.value = '';
+                    }
+                };
+
+                const playVideo = () => {
+                    video.value.play();
+                    status.value = 'play';
+                };
+
+                const pauseVideo = () => {
+                    video.value.pause();
+                    status.value = 'pause';
+                };
+
+                const takeSnapshot = () => {
+                    pauseVideo();
+                    dataUrl.value = canvas.value.toDataURL();
+                };
+
+                const handleFileUpload = (event) => {
+                    const file = event.target.files[0];
+                    if (file) {
+                        const reader = new FileReader();
+                        reader.onload = (e) => {
+                            const img = new Image();
+                            img.onload = () => {
+                                canvas.value.width = img.width;
+                                canvas.value.height = img.height;
+                                context.value.drawImage(img, 0, 0);
+                                dataUrl.value = canvas.value.toDataURL();
+                                runOcr();
+                            };
+                            img.src = e.target.result;
+                        };
+                        reader.readAsDataURL(file);
+                    }
+                };
+
+                const extractUrl = (text) => {
+                    const urlPattern = /(https?:\/\/[^\s]+)/g;
+                    const urls = text.match(urlPattern);
+                    url.value = urls ? urls[0] : '';
+                };
+
+                const updateOcrResult = (event) => {
+                    ocrResult.value = event.target.innerText;
+                };
+
+                const updateQrCodeResult = (event) => {
+                    qrCodeResult.value = event.target.innerText;
+                };
+
+                const copyToClipboard = () => {
+                    navigator.clipboard.writeText(ocrResult.value).then(() => {
+                        alert('OCR結果がクリップボードにコピーされました。');
+                    }).catch(error => console.error('コピーに失敗しました: ', error));
+                };
+
+                const exportToTextFile = () => {
+                    const blob = new Blob([ocrResult.value], { type: 'text/plain' });
+                    const link = document.createElement('a');
+                    link.href = URL.createObjectURL(blob);
+                    link.download = 'ocr_result.txt';
+                    link.click();
+                };
+
+                const saveToHistory = () => {
+                    const historyItem = {
+                        date: new Date().toLocaleString(),
+                        text: ocrResult.value,
+                        url: url.value,
+                        qrCodeResult: qrCodeResult.value,
+                        qrCodeUrl: qrCodeUrl.value
+                    };
+                    history.value.unshift(historyItem);
+                    if (history.value.length > 10) {
+                        history.value.pop();
+                    }
+                    localStorage.setItem('ocrHistory', JSON.stringify(history.value));
+                };
+
+                const loadFromHistory = (item) => {
+                    ocrResult.value = item.text;
+                    url.value = item.url;
+                    qrCodeResult.value = item.qrCodeResult;
+                    qrCodeUrl.value = item.qrCodeUrl;
+                };
+
+                const loadHistoryFromStorage = () => {
+                    const storedHistory = localStorage.getItem('ocrHistory');
+                    if (storedHistory) {
+                        history.value = JSON.parse(storedHistory);
+                    }
+                };
+
+                onMounted(() => {
+                    canvas.value = document.querySelector('canvas');
+                    context.value = canvas.value.getContext('2d');
+                    initialize();
+                    loadHistoryFromStorage();
+                });
+
+                return {
+                    video,
+                    canvas,
+                    context,
+                    dataUrl,
+                    status,
+                    cameraVisible,
+                    ocrResult,
+                    qrCodeResult,
+                    url,
+                    qrCodeUrl,
+                    history,
+                    initialize,
+                    runOcr,
+                    playVideo,
+                    pauseVideo,
+                    takeSnapshot,
+                    handleFileUpload,
+                    updateOcrResult,
+                    updateQrCodeResult,
+                    copyToClipboard,
+                    exportToTextFile,
+                    saveToHistory,
+                    loadFromHistory
+                };
+            }
+        }).mount('#app');
+    </script>
+</body>
+</html>
